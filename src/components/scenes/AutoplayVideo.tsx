@@ -5,14 +5,15 @@ import { useEffect, useRef } from "react";
 // doesn't always land as a live DOM property before the browser's
 // autoplay-policy check runs, silently leaving the video paused.
 //
-// It also actively keeps the video playing: browsers will sometimes
-// pause an autoplaying <video> on their own (buffering stalls, tab
-// backgrounding, memory pressure, scrolling far out of view) and
-// won't always resume it. This component only ever pushes playback
-// forward — it never calls pause() itself — so a video already
-// playing is left alone (no play/pause thrashing while it scrolls
-// through a moving carousel), and one the browser stopped gets
-// nudged back to life as soon as possible.
+// It plays the video only while its card is actually on screen, and
+// pauses it as soon as it scrolls out. The auto-scroll marquee keeps
+// two full copies of every project mounted at once (10 <video>
+// elements total for 5 projects), and every browser caps how many
+// videos it will decode concurrently — trying to force-play all of
+// them at once (the previous "never pause" approach) is exactly what
+// pushed past that cap and made playback freeze/stutter. Capping it
+// to "decode only what's visible" keeps concurrent decodes to a
+// handful and is what actually makes playback smooth and consistent.
 export function AutoplayVideo({ src, label }: { src: string; label: string }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
@@ -29,44 +30,53 @@ export function AutoplayVideo({ src, label }: { src: string; label: string }) {
         });
       }
     };
+    const tryPause = () => {
+      if (!el.paused) el.pause();
+    };
 
-    // Nudge playback forward on essentially every signal that could
-    // mean it stopped: metadata ready, a browser-initiated pause,
-    // a buffering stall/suspend, the tab coming back into focus, or
-    // the card scrolling back into view.
+    let isVisible = false;
+
+    // Play only while the card is genuinely in (or near) the
+    // viewport; pause the instant it isn't. rootMargin gives a
+    // little runway so playback starts just before a card scrolls
+    // fully into view rather than popping in mid-motion.
     let io: IntersectionObserver | undefined;
     if ("IntersectionObserver" in window) {
       io = new IntersectionObserver(
         (entries) => {
-          if (entries.some((e) => e.isIntersecting)) tryPlay();
+          const entry = entries[0];
+          isVisible = !!entry?.isIntersecting;
+          if (isVisible) tryPlay();
+          else tryPause();
         },
-        { threshold: 0.01 },
+        { threshold: 0.15, rootMargin: "80px" },
       );
       io.observe(el);
+    } else {
+      isVisible = true;
     }
 
-    el.addEventListener("loadedmetadata", tryPlay);
-    el.addEventListener("pause", tryPlay);
-    el.addEventListener("stalled", tryPlay);
-    el.addEventListener("suspend", tryPlay);
-    el.addEventListener("waiting", tryPlay);
-    document.addEventListener("visibilitychange", tryPlay);
+    // Re-nudge playback forward, but only for a card that's actually
+    // visible — a buffering stall/suspend or a tab regaining focus
+    // shouldn't resurrect a video the user has already scrolled away
+    // from.
+    const resumeIfVisible = () => {
+      if (isVisible) tryPlay();
+    };
 
-    // Also poll at a low frequency as a last-resort safety net —
-    // cheap, and catches anything the event listeners above miss.
-    const interval = window.setInterval(tryPlay, 2000);
-
-    tryPlay();
+    el.addEventListener("loadedmetadata", resumeIfVisible);
+    el.addEventListener("stalled", resumeIfVisible);
+    el.addEventListener("suspend", resumeIfVisible);
+    el.addEventListener("waiting", resumeIfVisible);
+    document.addEventListener("visibilitychange", resumeIfVisible);
 
     return () => {
       io?.disconnect();
-      window.clearInterval(interval);
-      el.removeEventListener("loadedmetadata", tryPlay);
-      el.removeEventListener("pause", tryPlay);
-      el.removeEventListener("stalled", tryPlay);
-      el.removeEventListener("suspend", tryPlay);
-      el.removeEventListener("waiting", tryPlay);
-      document.removeEventListener("visibilitychange", tryPlay);
+      el.removeEventListener("loadedmetadata", resumeIfVisible);
+      el.removeEventListener("stalled", resumeIfVisible);
+      el.removeEventListener("suspend", resumeIfVisible);
+      el.removeEventListener("waiting", resumeIfVisible);
+      document.removeEventListener("visibilitychange", resumeIfVisible);
     };
   }, [src]);
 
@@ -74,11 +84,10 @@ export function AutoplayVideo({ src, label }: { src: string; label: string }) {
     <video
       ref={videoRef}
       src={src}
-      autoPlay
       muted
       loop
       playsInline
-      preload="auto"
+      preload="metadata"
       aria-label={label}
     />
   );

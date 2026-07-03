@@ -603,7 +603,30 @@ export function Portfolio() {
       }
       raf = requestAnimationFrame(tick);
     };
-    raf = requestAnimationFrame(tick);
+
+    const startLoop = () => {
+      if (raf) return;
+      last = performance.now();
+      raf = requestAnimationFrame(tick);
+    };
+    const stopLoop = () => {
+      if (!raf) return;
+      cancelAnimationFrame(raf);
+      raf = 0;
+    };
+
+    // Gates the whole drift loop on real on-screen visibility —
+    // without this it used to run forever in the background, even
+    // scrolled fully out of view, which is what made the track feel
+    // like it "kept scrolling on its own" instead of settling.
+    const io = new IntersectionObserver(
+      ([entry]) => {
+        if (entry?.isIntersecting) startLoop();
+        else stopLoop();
+      },
+      { threshold: 0.1 },
+    );
+    io.observe(track);
 
     const pause = () => {
       paused = true;
@@ -624,7 +647,8 @@ export function Portfolio() {
     track.addEventListener("wheel", scheduleResume, { passive: true });
 
     return () => {
-      cancelAnimationFrame(raf);
+      io.disconnect();
+      stopLoop();
       if (resumeTimer) clearTimeout(resumeTimer);
       track.removeEventListener("pointerenter", pause);
       track.removeEventListener("pointerleave", scheduleResume);
